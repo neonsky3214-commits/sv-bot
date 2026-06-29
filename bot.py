@@ -12,6 +12,7 @@ YANDEX_TOKEN = "y0__wgBEJ3Q8pgHGKXLRCDTxpmMGGSA4BK2B7UUkS6GUa74x3echsBM"
 METRIKA_COUNTER = "45738897"
 DIRECT_LOGIN = "yd-sv-rub-hl-463642-d81o"
 B2B_KEYWORD = "b2b"
+FORM_GOAL_ID = "277270181"  # цель "Заполнение форм Обратный звонок"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,6 +23,26 @@ HEADERS = {"Authorization": f"OAuth {YANDEX_TOKEN}"}
 
 def is_b2b(campaign_name: str) -> bool:
     return B2B_KEYWORD in campaign_name.lower()
+
+
+def metrika_totals(metrics: str, filters: str, date: str, extra: dict = None) -> list:
+    """Универсальный запрос — возвращает массив totals"""
+    params = {
+        "ids": METRIKA_COUNTER,
+        "metrics": metrics,
+        "date1": date,
+        "date2": date,
+        "limit": 1,
+    }
+    if filters:
+        params["filters"] = filters
+    if extra:
+        params.update(extra)
+    resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
+    if resp.status_code != 200:
+        logger.error(f"Метрика ошибка ({metrics}): {resp.status_code} {resp.text}")
+        return [0] * len(metrics.split(","))
+    return resp.json().get("totals", [0] * len(metrics.split(",")))
 
 
 def get_ad_costs(date: str) -> dict:
@@ -43,7 +64,6 @@ def get_ad_costs(date: str) -> dict:
     data = resp.json()
     b2b_cost = other_cost = 0.0
     b2b_clicks = other_clicks = 0
-
     for row in data.get("data", []):
         name = row["dimensions"][0].get("name") or ""
         m = row.get("metrics", [0, 0])
@@ -64,50 +84,42 @@ def get_ad_costs(date: str) -> dict:
     }
 
 
-def get_ad_revenue(date: str) -> dict:
-    """Доход и покупки из Метрики по рекламным кампаниям, разбивка b2b/other по имени кампании"""
-    params = {
-        "ids": METRIKA_COUNTER,
-        "metrics": "ym:s:ecommerceRevenue,ym:s:ecommercePurchases,ym:s:visits",
-        "dimensions": "ym:s:directOrder",
-        "date1": date,
-        "date2": date,
-        "direct_client_logins": DIRECT_LOGIN,
-        "limit": 200,
-    }
-    resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
-    if resp.status_code != 200:
-        logger.error(f"Метрика доход ошибка: {resp.status_code} {resp.text}")
-        return {"b2b_revenue": 0, "other_revenue": 0, "b2b_purchases": 0,
-                "other_purchases": 0, "b2b_visits": 0, "other_visits": 0}
+def get_b2b_leads(date: str) -> int:
+    """Заявки B2B — цель 'заполнение форм' по рекламным b2b-кампаниям"""
+    t = metrika_totals(
+        f"ym:s:goal{FORM_GOAL_ID}reaches",
+        "ym:s:lastSignTrafficSource=='ad' AND ym:s:lastSignUTMCampaign=@'b2b'",
+        date,
+    )
+    return int(t[0]) if t else 0
 
-    data = resp.json()
-    b2b_revenue = other_revenue = 0.0
-    b2b_purchases = other_purchases = 0
-    b2b_visits = other_visits = 0
 
-    for row in data.get("data", []):
-        name = row["dimensions"][0].get("name") or ""
-        m = row.get("metrics", [0, 0, 0])
-        revenue = float(m[0]) if len(m) > 0 else 0
-        purchases = int(m[1]) if len(m) > 1 else 0
-        visits = int(m[2]) if len(m) > 2 else 0
-        if is_b2b(name):
-            b2b_revenue += revenue
-            b2b_purchases += purchases
-            b2b_visits += visits
-        else:
-            other_revenue += revenue
-            other_purchases += purchases
-            other_visits += visits
+def get_revenue(date: str) -> dict:
+    """Доход, заказы, купленные товары — всего по рекламе и отдельно B2B (для вычитания)"""
+    # Всего по рекламе
+    total = metrika_totals(
+        "ym:s:ecommerceRevenue,ym:s:ecommercePurchases,ym:s:productPurchasedQuantity",
+        "ym:s:lastSignTrafficSource=='ad'",
+        date,
+    )
+    total_revenue = float(total[0]) if len(total) > 0 else 0
+    total_orders = int(total[1]) if len(total) > 1 else 0
+    total_products = int(total[2]) if len(total) > 2 else 0
+
+    # B2B (чтобы вычесть из "остального")
+    b2b = metrika_totals(
+        "ym:s:ecommerceRevenue,ym:s:ecommercePurchases,ym:s:productPurchasedQuantity",
+        "ym:s:lastSignTrafficSource=='ad' AND ym:s:lastSignUTMCampaign=@'b2b'",
+        date,
+    )
+    b2b_revenue = float(b2b[0]) if len(b2b) > 0 else 0
+    b2b_orders = int(b2b[1]) if len(b2b) > 1 else 0
+    b2b_products = int(b2b[2]) if len(b2b) > 2 else 0
 
     return {
-        "b2b_revenue": b2b_revenue,
-        "other_revenue": other_revenue,
-        "b2b_purchases": b2b_purchases,
-        "other_purchases": other_purchases,
-        "b2b_visits": b2b_visits,
-        "other_visits": other_visits,
+        "other_revenue": max(total_revenue - b2b_revenue, 0),
+        "other_orders": max(total_orders - b2b_orders, 0),
+        "other_products": max(total_products - b2b_products, 0),
     }
 
 
@@ -121,6 +133,12 @@ def calc_roas(revenue: float, cost: float) -> str:
     return f"{revenue / cost:.1f}x"
 
 
+def calc_cpl(cost: float, leads: int) -> str:
+    if leads == 0:
+        return "—"
+    return format_money(cost / leads)
+
+
 async def send_daily_report():
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     date_label = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
@@ -128,11 +146,10 @@ async def send_daily_report():
     logger.info(f"Формирую отчёт за {yesterday}...")
 
     costs = get_ad_costs(yesterday)
-    rev = get_ad_revenue(yesterday)
+    b2b_leads = get_b2b_leads(yesterday)
+    rev = get_revenue(yesterday)
 
     total_cost = costs["b2b_cost"] + costs["other_cost"]
-    total_revenue = rev["b2b_revenue"] + rev["other_revenue"]
-    total_purchases = rev["b2b_purchases"] + rev["other_purchases"]
     total_clicks = costs["b2b_clicks"] + costs["other_clicks"]
 
     msg = f"""📊 *Отчёт за {date_label}*
@@ -140,26 +157,24 @@ async def send_daily_report():
 ━━━━━━━━━━━━━━━━
 🏢 *B2B*
 💸 Расходы: {format_money(costs['b2b_cost'])}
-💰 Доход: {format_money(rev['b2b_revenue'])}
-🛒 Заявки: {rev['b2b_purchases']}
 🖱 Клики: {costs['b2b_clicks']}
-📈 ROAS: {calc_roas(rev['b2b_revenue'], costs['b2b_cost'])}
+📝 Заявки (форма): {b2b_leads}
+💵 CPL: {calc_cpl(costs['b2b_cost'], b2b_leads)}
 
 ━━━━━━━━━━━━━━━━
 ⛵ *Остальные кампании*
 💸 Расходы: {format_money(costs['other_cost'])}
-💰 Доход: {format_money(rev['other_revenue'])}
-🛒 Заявки: {rev['other_purchases']}
 🖱 Клики: {costs['other_clicks']}
+💰 Доход: {format_money(rev['other_revenue'])}
+🛒 Заказы: {rev['other_orders']}
+📦 Куплено товаров: {rev['other_products']}
 📈 ROAS: {calc_roas(rev['other_revenue'], costs['other_cost'])}
 
 ━━━━━━━━━━━━━━━━
 📌 *Итого*
 💸 Расходы: {format_money(total_cost)}
-💰 Доход: {format_money(total_revenue)}
-🛒 Всего заявок: {total_purchases}
-🖱 Всего кликов: {total_clicks}
-📈 ROAS: {calc_roas(total_revenue, total_cost)}"""
+🖱 Клики: {total_clicks}
+💰 Доход: {format_money(rev['other_revenue'])}"""
 
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
