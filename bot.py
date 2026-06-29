@@ -311,11 +311,45 @@ def calc_per_unit(cost: float, units: int) -> str:
     return format_money(cost / units)
 
 
+def get_compare_period(date1: str, date2: str) -> tuple:
+    """Возвращает (cmp_date1, cmp_date2) — период для сравнения.
+    Один день -> тот же день неделю назад.
+    Несколько дней -> предыдущий отрезок такой же длины."""
+    d1 = datetime.strptime(date1, "%Y-%m-%d")
+    d2 = datetime.strptime(date2, "%Y-%m-%d")
+    if date1 == date2:
+        c1 = d1 - timedelta(days=7)
+        return c1.strftime("%Y-%m-%d"), c1.strftime("%Y-%m-%d")
+    length = (d2 - d1).days + 1
+    c2 = d1 - timedelta(days=1)
+    c1 = c2 - timedelta(days=length - 1)
+    return c1.strftime("%Y-%m-%d"), c2.strftime("%Y-%m-%d")
+
+
+def delta(current: float, previous: float, invert: bool = False) -> str:
+    """Форматирует дельту со стрелкой. invert=True — рост считается негативным (для расхода/CPL/CPO)."""
+    if previous == 0:
+        if current == 0:
+            return "→ 0%"
+        return "🆕"
+    change = (current - previous) / previous * 100
+    if abs(change) < 2:
+        return "→ 0%"
+    arrow = "↑" if change > 0 else "↓"
+    return f"{arrow} {change:+.0f}%"
+
+
 def build_report(date1: str, date2: str) -> str:
     """Собирает текст отчёта за период [date1; date2]"""
     d1 = datetime.strptime(date1, "%Y-%m-%d").strftime("%d.%m.%Y")
     d2 = datetime.strptime(date2, "%Y-%m-%d").strftime("%d.%m.%Y")
     period_label = d1 if date1 == date2 else f"{d1} — {d2}"
+
+    # Период сравнения
+    cmp1, cmp2 = get_compare_period(date1, date2)
+    cmp_label = datetime.strptime(cmp1, "%Y-%m-%d").strftime("%d.%m")
+    if cmp1 != cmp2:
+        cmp_label = f"{cmp_label}–{datetime.strptime(cmp2, '%Y-%m-%d').strftime('%d.%m')}"
 
     costs = get_ad_costs(date1, date2)
     b2b_leads = get_b2b_leads(date1, date2)
@@ -325,10 +359,29 @@ def build_report(date1: str, date2: str) -> str:
     sources = get_traffic_sources(date1, date2)
     top_products = get_top_products(date1, date2)
 
+    # Данные за период сравнения (только ключевые)
+    p_costs = get_ad_costs(cmp1, cmp2)
+    p_b2b_leads = get_b2b_leads(cmp1, cmp2)
+    p_retail = get_retail(cmp1, cmp2)
+
     b2b_cost = costs["b2b_cost"]
     other_cost = costs["other_cost"]
     total_cost = b2b_cost + other_cost
     total_clicks = costs["b2b_clicks"] + costs["other_clicks"]
+
+    p_b2b_cost = p_costs["b2b_cost"]
+    p_other_cost = p_costs["other_cost"]
+    p_total_cost = p_b2b_cost + p_other_cost
+    p_total_clicks = p_costs["b2b_clicks"] + p_costs["other_clicks"]
+
+    # Производные текущие
+    b2b_cpl_val = (b2b_cost / b2b_leads) if b2b_leads else 0
+    other_cpo_val = (other_cost / retail["orders"]) if retail["orders"] else 0
+    roas_val = (retail["revenue"] / other_cost) if other_cost else 0
+    # Производные прошлые
+    p_b2b_cpl_val = (p_b2b_cost / p_b2b_leads) if p_b2b_leads else 0
+    p_other_cpo_val = (p_other_cost / p_retail["orders"]) if p_retail["orders"] else 0
+    p_roas_val = (p_retail["revenue"] / p_other_cost) if p_other_cost else 0
 
     if top_products:
         products_lines = "\n".join(
@@ -339,7 +392,6 @@ def build_report(date1: str, date2: str) -> str:
     else:
         products_block = ""
 
-    # Блок направлений
     if directions:
         dir_lines = "\n".join(
             f"{d['name']}: {format_money(d['price'])} ({d['qty']} шт)"
@@ -349,7 +401,6 @@ def build_report(date1: str, date2: str) -> str:
     else:
         directions_block = ""
 
-    # Блок источников трафика
     if sources:
         src_lines = "\n".join(
             f"{s['name']}: {s['visits']} виз. ({format_money(s['revenue'])})"
@@ -360,24 +411,25 @@ def build_report(date1: str, date2: str) -> str:
         sources_block = ""
 
     return f"""📊 *Отчёт за {period_label}*
+_сравнение с {cmp_label}_
 
 ━━━━━━━━━━━━━━━━
 🏢 *B2B*
-💸 Расходы: {format_money(b2b_cost)}
+💸 Расходы: {format_money(b2b_cost)} {delta(b2b_cost, p_b2b_cost)}
 🧾 Расходы с НДС: {format_money(b2b_cost * VAT_RATE)}
-🖱 Клики: {costs['b2b_clicks']}
-📝 Заявки (форма): {b2b_leads}
-💵 CPL: {calc_per_unit(b2b_cost, b2b_leads)}
+🖱 Клики: {costs['b2b_clicks']} {delta(costs['b2b_clicks'], p_costs['b2b_clicks'])}
+📝 Заявки (форма): {b2b_leads} {delta(b2b_leads, p_b2b_leads)}
+💵 CPL: {calc_per_unit(b2b_cost, b2b_leads)} {delta(b2b_cpl_val, p_b2b_cpl_val)}
 
 ━━━━━━━━━━━━━━━━
 ⛵ *Розница*
-💸 Расходы: {format_money(other_cost)}
+💸 Расходы: {format_money(other_cost)} {delta(other_cost, p_other_cost)}
 🧾 Расходы с НДС: {format_money(other_cost * VAT_RATE)}
-🖱 Клики: {costs['other_clicks']}
-🛒 Оплаты/заказы: {retail['orders']}
-💵 CPO: {calc_per_unit(other_cost, retail['orders'])}
-💰 Доход: {format_money(retail['revenue'])}
-📈 ROAS: {calc_roas(retail['revenue'], other_cost)}
+🖱 Клики: {costs['other_clicks']} {delta(costs['other_clicks'], p_costs['other_clicks'])}
+🛒 Оплаты/заказы: {retail['orders']} {delta(retail['orders'], p_retail['orders'])}
+💵 CPO: {calc_per_unit(other_cost, retail['orders'])} {delta(other_cpo_val, p_other_cpo_val)}
+💰 Доход: {format_money(retail['revenue'])} {delta(retail['revenue'], p_retail['revenue'])}
+📈 ROAS: {calc_roas(retail['revenue'], other_cost)} {delta(roas_val, p_roas_val)}
 
 ━━━━━━━━━━━━━━━━
 🌐 *Покупки по всему сайту*
@@ -386,10 +438,10 @@ def build_report(date1: str, date2: str) -> str:
 
 ━━━━━━━━━━━━━━━━
 📌 *Итого*
-💸 Расходы: {format_money(total_cost)}
+💸 Расходы: {format_money(total_cost)} {delta(total_cost, p_total_cost)}
 🧾 Расходы с НДС: {format_money(total_cost * VAT_RATE)}
-🖱 Клики: {total_clicks}
-💰 Доход: {format_money(retail['revenue'])}"""
+🖱 Клики: {total_clicks} {delta(total_clicks, p_total_clicks)}
+💰 Доход: {format_money(retail['revenue'])} {delta(retail['revenue'], p_retail['revenue'])}"""
 
 
 def valid_date(s: str) -> bool:
