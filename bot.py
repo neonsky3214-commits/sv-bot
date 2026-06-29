@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
+from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # === НАСТРОЙКИ ===
@@ -404,11 +406,14 @@ BTN_TODAY = "📅 Сегодня"
 BTN_YESTERDAY = "🕐 Вчера"
 BTN_WEEK = "📆 Неделя"
 BTN_MONTH = "🗓 Месяц"
+BTN_CAL_DAY = "📅 Выбрать день"
+BTN_CAL_PERIOD = "📆 Выбрать период"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [BTN_TODAY, BTN_YESTERDAY],
         [BTN_WEEK, BTN_MONTH],
+        [BTN_CAL_DAY, BTN_CAL_PERIOD],
     ],
     resize_keyboard=True,
 )
@@ -490,6 +495,67 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d1 = (today - timedelta(days=30)).strftime("%Y-%m-%d")
         d2 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
         await send_for_period(update, d1, d2, "последние 30 дней")
+    elif text == BTN_CAL_DAY:
+        context.user_data["cal_mode"] = "day"
+        calendar, step = DetailedTelegramCalendar(locale="ru").build()
+        await update.message.reply_text(
+            f"Выбери дату ({LSTEP[step]}):", reply_markup=calendar
+        )
+    elif text == BTN_CAL_PERIOD:
+        context.user_data["cal_mode"] = "period_start"
+        context.user_data.pop("period_d1", None)
+        calendar, step = DetailedTelegramCalendar(locale="ru").build()
+        await update.message.reply_text(
+            f"Выбери дату НАЧАЛА периода ({LSTEP[step]}):", reply_markup=calendar
+        )
+
+
+async def on_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий внутри inline-календаря"""
+    query = update.callback_query
+    result, key, step = DetailedTelegramCalendar(locale="ru").process(query.data)
+
+    if not result and key:
+        # ещё выбираем (год/месяц/день) — обновляем календарь
+        await query.edit_message_text(
+            f"Выбери дату ({LSTEP[step]}):", reply_markup=key
+        )
+        return
+
+    if not result:
+        return
+
+    # result — выбранная дата (datetime.date)
+    chosen = result.strftime("%Y-%m-%d")
+    mode = context.user_data.get("cal_mode", "day")
+
+    if mode == "day":
+        await query.edit_message_text(f"📅 Дата выбрана: {result.strftime('%d.%m.%Y')}")
+        await query.message.reply_text(f"Считаю отчёт за {chosen}…", reply_markup=MAIN_KEYBOARD)
+        report = build_report(chosen, chosen)
+        await query.message.reply_text(report, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+    elif mode == "period_start":
+        context.user_data["period_d1"] = chosen
+        context.user_data["cal_mode"] = "period_end"
+        await query.edit_message_text(f"Начало: {result.strftime('%d.%m.%Y')}")
+        calendar, step = DetailedTelegramCalendar(locale="ru").build()
+        await query.message.reply_text(
+            f"Теперь выбери дату КОНЦА периода ({LSTEP[step]}):", reply_markup=calendar
+        )
+
+    elif mode == "period_end":
+        d1 = context.user_data.get("period_d1", chosen)
+        d2 = chosen
+        if d1 > d2:
+            d1, d2 = d2, d1
+        await query.edit_message_text(
+            f"Период: {datetime.strptime(d1, '%Y-%m-%d').strftime('%d.%m.%Y')} — "
+            f"{datetime.strptime(d2, '%Y-%m-%d').strftime('%d.%m.%Y')}"
+        )
+        await query.message.reply_text(f"Считаю отчёт за период…", reply_markup=MAIN_KEYBOARD)
+        report = build_report(d1, d2)
+        await query.message.reply_text(report, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
 
 
 # === АВТОРАССЫЛКА ===
@@ -516,6 +582,7 @@ def main():
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("date", cmd_date))
     app.add_handler(CommandHandler("period", cmd_period))
+    app.add_handler(CallbackQueryHandler(on_calendar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_button))
 
     logger.info("Бот запущен.")
