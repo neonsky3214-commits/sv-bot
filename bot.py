@@ -406,14 +406,11 @@ BTN_TODAY = "📅 Сегодня"
 BTN_YESTERDAY = "🕐 Вчера"
 BTN_WEEK = "📆 Неделя"
 BTN_MONTH = "🗓 Месяц"
-BTN_CAL_DAY = "📅 Выбрать день"
-BTN_CAL_PERIOD = "📆 Выбрать период"
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [BTN_TODAY, BTN_YESTERDAY],
         [BTN_WEEK, BTN_MONTH],
-        [BTN_CAL_DAY, BTN_CAL_PERIOD],
     ],
     resize_keyboard=True,
 )
@@ -495,19 +492,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         d1 = (today - timedelta(days=30)).strftime("%Y-%m-%d")
         d2 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
         await send_for_period(update, d1, d2, "последние 30 дней")
-    elif text == BTN_CAL_DAY:
-        context.user_data["cal_mode"] = "day"
-        calendar, step = DetailedTelegramCalendar(locale="ru").build()
-        await update.message.reply_text(
-            f"Выбери дату ({LSTEP[step]}):", reply_markup=calendar
-        )
-    elif text == BTN_CAL_PERIOD:
-        context.user_data["cal_mode"] = "period_start"
-        context.user_data.pop("period_d1", None)
-        calendar, step = DetailedTelegramCalendar(locale="ru").build()
-        await update.message.reply_text(
-            f"Выбери дату НАЧАЛА периода ({LSTEP[step]}):", reply_markup=calendar
-        )
 
 
 async def on_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
