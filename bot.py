@@ -1,8 +1,8 @@
-import asyncio
 import logging
 from datetime import datetime, timedelta
 import requests
-from telegram import Bot
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # === НАСТРОЙКИ ===
@@ -27,13 +27,12 @@ def is_b2b(campaign_name: str) -> bool:
     return B2B_KEYWORD in campaign_name.lower()
 
 
-def metrika_totals(metrics: str, filters: str, date: str) -> list:
-    """Универсальный запрос — возвращает массив totals"""
+def metrika_totals(metrics: str, filters: str, date1: str, date2: str) -> list:
     params = {
         "ids": METRIKA_COUNTER,
         "metrics": metrics,
-        "date1": date,
-        "date2": date,
+        "date1": date1,
+        "date2": date2,
         "limit": 1,
     }
     if filters:
@@ -45,14 +44,13 @@ def metrika_totals(metrics: str, filters: str, date: str) -> list:
     return resp.json().get("totals", [0] * len(metrics.split(",")))
 
 
-def get_ad_costs(date: str) -> dict:
-    """Расходы и клики из Метрики (данные Директа), разбивка b2b/other по имени кампании"""
+def get_ad_costs(date1: str, date2: str) -> dict:
     params = {
         "ids": METRIKA_COUNTER,
         "metrics": "ym:ad:RUBConvertedAdCost,ym:ad:clicks",
         "dimensions": "ym:ad:directOrder",
-        "date1": date,
-        "date2": date,
+        "date1": date1,
+        "date2": date2,
         "direct_client_logins": DIRECT_LOGIN,
         "limit": 200,
     }
@@ -84,22 +82,20 @@ def get_ad_costs(date: str) -> dict:
     }
 
 
-def get_b2b_leads(date: str) -> int:
-    """Заявки B2B — цель 'заполнение форм' по визитам с входом на /corporate"""
+def get_b2b_leads(date1: str, date2: str) -> int:
     t = metrika_totals(
         f"ym:s:goal{FORM_GOAL_ID}reaches",
         f"ym:s:lastSignTrafficSource=='ad' AND ym:s:startURL=@'{B2B_LANDING}'",
-        date,
+        date1, date2,
     )
     return int(t[0]) if t else 0
 
 
-def get_retail(date: str) -> dict:
-    """Розница: оплаты, доход, кол-во товаров по всей рекламе"""
+def get_retail(date1: str, date2: str) -> dict:
     t = metrika_totals(
         "ym:s:ecommerceRevenue,ym:s:ecommercePurchases,ym:s:productPurchasedQuantity",
         "ym:s:lastSignTrafficSource=='ad'",
-        date,
+        date1, date2,
     )
     return {
         "revenue": float(t[0]) if len(t) > 0 else 0,
@@ -108,15 +104,14 @@ def get_retail(date: str) -> dict:
     }
 
 
-def get_top_products(date: str, top_n: int = 10) -> list:
-    """Топ купленных товаров по рекламе, сортировка по сумме покупок (название, кол-во, сумма)"""
+def get_top_products(date1: str, date2: str, top_n: int = 10) -> list:
     params = {
         "ids": METRIKA_COUNTER,
         "metrics": "ym:s:productPurchasedQuantity,ym:s:productPurchasedPrice",
         "dimensions": "ym:s:productName",
         "filters": "ym:s:lastSignTrafficSource=='ad'",
-        "date1": date,
-        "date2": date,
+        "date1": date1,
+        "date2": date2,
         "limit": 100,
     }
     resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
@@ -157,23 +152,22 @@ def calc_per_unit(cost: float, units: int) -> str:
     return format_money(cost / units)
 
 
-async def send_daily_report():
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    date_label = (datetime.now() - timedelta(days=1)).strftime("%d.%m.%Y")
+def build_report(date1: str, date2: str) -> str:
+    """Собирает текст отчёта за период [date1; date2]"""
+    d1 = datetime.strptime(date1, "%Y-%m-%d").strftime("%d.%m.%Y")
+    d2 = datetime.strptime(date2, "%Y-%m-%d").strftime("%d.%m.%Y")
+    period_label = d1 if date1 == date2 else f"{d1} — {d2}"
 
-    logger.info(f"Формирую отчёт за {yesterday}...")
-
-    costs = get_ad_costs(yesterday)
-    b2b_leads = get_b2b_leads(yesterday)
-    retail = get_retail(yesterday)
-    top_products = get_top_products(yesterday)
+    costs = get_ad_costs(date1, date2)
+    b2b_leads = get_b2b_leads(date1, date2)
+    retail = get_retail(date1, date2)
+    top_products = get_top_products(date1, date2)
 
     b2b_cost = costs["b2b_cost"]
     other_cost = costs["other_cost"]
     total_cost = b2b_cost + other_cost
     total_clicks = costs["b2b_clicks"] + costs["other_clicks"]
 
-    # Блок топ товаров
     if top_products:
         products_lines = "\n".join(
             f"• {p['name']} — {format_money(p['price'])} ({p['qty']} шт)"
@@ -183,7 +177,7 @@ async def send_daily_report():
     else:
         products_block = ""
 
-    msg = f"""📊 *Отчёт за {date_label}*
+    return f"""📊 *Отчёт за {period_label}*
 
 ━━━━━━━━━━━━━━━━
 🏢 *B2B*
@@ -210,23 +204,96 @@ async def send_daily_report():
 🖱 Клики: {total_clicks}
 💰 Доход: {format_money(retail['revenue'])}"""
 
-    bot = Bot(token=TELEGRAM_TOKEN)
-    await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
-    logger.info("Отчёт отправлен!")
+
+def valid_date(s: str) -> bool:
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
 
 
-async def main():
+# === КОМАНДЫ ===
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "👋 Привет! Я присылаю отчёт по рекламе.\n\n"
+        "Команды:\n"
+        "/today — отчёт за сегодня\n"
+        "/yesterday — за вчера\n"
+        "/date 2026-06-27 — за конкретный день\n"
+        "/period 2026-06-01 2026-06-27 — за период\n\n"
+        "Автоматически отчёт за вчера приходит каждый день в 10:00 МСК."
+    )
+    await update.message.reply_text(text)
+
+
+async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    d = datetime.now().strftime("%Y-%m-%d")
+    await update.message.reply_text("Считаю отчёт за сегодня…")
+    report = build_report(d, d)
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+
+async def cmd_yesterday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    d = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    await update.message.reply_text("Считаю отчёт за вчера…")
+    report = build_report(d, d)
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+
+async def cmd_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not valid_date(context.args[0]):
+        await update.message.reply_text("Укажи дату так: /date 2026-06-27")
+        return
+    d = context.args[0]
+    await update.message.reply_text(f"Считаю отчёт за {d}…")
+    report = build_report(d, d)
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+
+async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2 or not valid_date(context.args[0]) or not valid_date(context.args[1]):
+        await update.message.reply_text("Укажи период так: /period 2026-06-01 2026-06-27")
+        return
+    d1, d2 = context.args[0], context.args[1]
+    if d1 > d2:
+        d1, d2 = d2, d1
+    await update.message.reply_text(f"Считаю отчёт за {d1} — {d2}…")
+    report = build_report(d1, d2)
+    await update.message.reply_text(report, parse_mode="Markdown")
+
+
+# === АВТОРАССЫЛКА ===
+
+async def scheduled_report(app):
+    d = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    report = build_report(d, d)
+    await app.bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
+    logger.info("Авто-отчёт отправлен!")
+
+
+def main():
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("yesterday", cmd_yesterday))
+    app.add_handler(CommandHandler("date", cmd_date))
+    app.add_handler(CommandHandler("period", cmd_period))
+
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(send_daily_report, "cron", hour=10, minute=0)
-    scheduler.start()
-    logger.info("Бот запущен. Отчёты каждый день в 10:00 МСК")
+    scheduler.add_job(scheduled_report, "cron", hour=10, minute=0, args=[app])
 
-    # Тестовая отправка сразу при запуске
-    await send_daily_report()
+    async def on_startup(application):
+        scheduler.start()
+        logger.info("Планировщик запущен. Авто-отчёт каждый день в 10:00 МСК")
 
-    while True:
-        await asyncio.sleep(3600)
+    app.post_init = on_startup
+
+    logger.info("Бот запущен.")
+    app.run_polling()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
