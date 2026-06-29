@@ -1,8 +1,10 @@
 import logging
 from datetime import datetime, timedelta
 import requests
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, ContextTypes, filters
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # === НАСТРОЙКИ ===
@@ -396,19 +398,35 @@ def valid_date(s: str) -> bool:
         return False
 
 
+# === КЛАВИАТУРА ===
+
+BTN_TODAY = "📅 Сегодня"
+BTN_YESTERDAY = "🕐 Вчера"
+BTN_WEEK = "📆 Неделя"
+BTN_MONTH = "🗓 Месяц"
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [BTN_TODAY, BTN_YESTERDAY],
+        [BTN_WEEK, BTN_MONTH],
+    ],
+    resize_keyboard=True,
+)
+
+
 # === КОМАНДЫ ===
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Привет! Я присылаю отчёт по рекламе.\n\n"
-        "Команды:\n"
-        "/today — отчёт за сегодня\n"
+        "Нажми кнопку внизу или используй команды:\n"
+        "/today — за сегодня\n"
         "/yesterday — за вчера\n"
         "/date 2026-06-27 — за конкретный день\n"
         "/period 2026-06-01 2026-06-27 — за период\n\n"
-        "Автоматически отчёт за вчера приходит каждый день в 10:00 МСК."
+        "Автоотчёт за вчера приходит каждый день в 10:00 МСК."
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, reply_markup=MAIN_KEYBOARD)
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -447,6 +465,33 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(report, parse_mode="Markdown")
 
 
+async def send_for_period(update: Update, d1: str, d2: str, label: str):
+    await update.message.reply_text(f"Считаю отчёт за {label}…", reply_markup=MAIN_KEYBOARD)
+    report = build_report(d1, d2)
+    await update.message.reply_text(report, parse_mode="Markdown", reply_markup=MAIN_KEYBOARD)
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки клавиатуры"""
+    text = update.message.text
+    today = datetime.now()
+
+    if text == BTN_TODAY:
+        d = today.strftime("%Y-%m-%d")
+        await send_for_period(update, d, d, "сегодня")
+    elif text == BTN_YESTERDAY:
+        d = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        await send_for_period(update, d, d, "вчера")
+    elif text == BTN_WEEK:
+        d1 = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+        d2 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        await send_for_period(update, d1, d2, "последние 7 дней")
+    elif text == BTN_MONTH:
+        d1 = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+        d2 = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+        await send_for_period(update, d1, d2, "последние 30 дней")
+
+
 # === АВТОРАССЫЛКА ===
 
 async def scheduled_report(app):
@@ -471,6 +516,7 @@ def main():
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("date", cmd_date))
     app.add_handler(CommandHandler("period", cmd_period))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_button))
 
     logger.info("Бот запущен.")
     app.run_polling()
