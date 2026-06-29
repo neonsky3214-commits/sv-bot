@@ -106,7 +106,7 @@ def get_metrika_revenue(date: str) -> dict:
     # Общий доход от рекламы
     params = {
         "ids": METRIKA_COUNTER,
-        "metrics": "ym:s:purchaseRevenue,ym:s:purchases",
+        "metrics": "ym:s:ecommerceRevenue,ym:s:ecommercePurchases",
         "dimensions": "ym:s:lastSignUTMCampaign",
         "filters": "ym:s:lastSignTrafficSource=='ad'",
         "date1": date,
