@@ -108,8 +108,8 @@ def get_retail(date: str) -> dict:
     }
 
 
-def get_top_products(date: str, top_n: int = 5) -> list:
-    """Топ купленных товаров по рекламе (название, кол-во, сумма)"""
+def get_top_products(date: str, top_n: int = 10) -> list:
+    """Топ купленных товаров по рекламе, сортировка по сумме покупок (название, кол-во, сумма)"""
     params = {
         "ids": METRIKA_COUNTER,
         "metrics": "ym:s:productPurchasedQuantity,ym:s:productPurchasedPrice",
@@ -137,7 +137,7 @@ def get_top_products(date: str, top_n: int = 5) -> list:
             grouped[name] = {"qty": qty, "price": price}
 
     items = [{"name": n, "qty": v["qty"], "price": v["price"]} for n, v in grouped.items()]
-    items.sort(key=lambda x: x["qty"], reverse=True)
+    items.sort(key=lambda x: x["price"], reverse=True)
     return items[:top_n]
 
 
@@ -176,7 +176,7 @@ async def send_daily_report():
     # Блок топ товаров
     if top_products:
         products_lines = "\n".join(
-            f"• {p['name']} — {p['qty']} шт ({format_money(p['price'])})"
+            f"• {p['name']} — {format_money(p['price'])} ({p['qty']} шт)"
             for p in top_products
         )
         products_block = f"\n\n━━━━━━━━━━━━━━━━\n🏆 *Топ товаров*\n{products_lines}"
