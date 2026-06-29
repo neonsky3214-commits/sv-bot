@@ -274,22 +274,20 @@ async def scheduled_report(app):
 
 
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+    async def on_startup(application):
+        scheduler.add_job(scheduled_report, "cron", hour=10, minute=0, args=[application])
+        scheduler.start()
+        logger.info("Планировщик запущен. Авто-отчёт каждый день в 10:00 МСК")
+
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(on_startup).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("yesterday", cmd_yesterday))
     app.add_handler(CommandHandler("date", cmd_date))
     app.add_handler(CommandHandler("period", cmd_period))
-
-    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    scheduler.add_job(scheduled_report, "cron", hour=10, minute=0, args=[app])
-
-    async def on_startup(application):
-        scheduler.start()
-        logger.info("Планировщик запущен. Авто-отчёт каждый день в 10:00 МСК")
-
-    app.post_init = on_startup
 
     logger.info("Бот запущен.")
     app.run_polling()
