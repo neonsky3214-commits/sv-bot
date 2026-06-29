@@ -182,6 +182,50 @@ def classify_direction(name: str) -> str:
     return "🏙 Город"
 
 
+def get_traffic_sources(date1: str, date2: str) -> list:
+    """Визиты и доход по источникам трафика (весь сайт)"""
+    source_names = {
+        "organic": "🔍 Поиск",
+        "direct": "➡️ Прямые заходы",
+        "ad": "📢 Реклама",
+        "social": "💬 Соцсети",
+        "email": "✉️ Email",
+        "referral": "🔗 Ссылки",
+        "internal": "🏠 Внутренние",
+        "messenger": "📨 Мессенджеры",
+        "recommend": "⭐ Рекомендации",
+        "saved": "💾 Сохранённые",
+    }
+    params = {
+        "ids": METRIKA_COUNTER,
+        "metrics": "ym:s:visits,ym:s:ecommerceRevenue",
+        "dimensions": "ym:s:lastSignTrafficSource",
+        "date1": date1,
+        "date2": date2,
+        "limit": 20,
+    }
+    resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
+    if resp.status_code != 200:
+        logger.error(f"Метрика источники ошибка: {resp.status_code} {resp.text}")
+        return []
+
+    items = []
+    for row in resp.json().get("data", []):
+        sid = row["dimensions"][0].get("id")
+        m = row.get("metrics", [0, 0])
+        visits = int(m[0]) if len(m) > 0 else 0
+        revenue = float(m[1]) if len(m) > 1 else 0
+        if visits == 0:
+            continue
+        items.append({
+            "name": source_names.get(sid, sid),
+            "visits": visits,
+            "revenue": revenue,
+        })
+    items.sort(key=lambda x: x["visits"], reverse=True)
+    return items
+
+
 def get_directions(date1: str, date2: str) -> list:
     """Доход и кол-во по направлениям (по названиям товаров, реклама)"""
     params = {
@@ -274,6 +318,7 @@ def build_report(date1: str, date2: str) -> str:
     retail = get_retail(date1, date2)
     users = get_user_split(date1, date2)
     directions = get_directions(date1, date2)
+    sources = get_traffic_sources(date1, date2)
     top_products = get_top_products(date1, date2)
 
     b2b_cost = costs["b2b_cost"]
@@ -300,6 +345,16 @@ def build_report(date1: str, date2: str) -> str:
     else:
         directions_block = ""
 
+    # Блок источников трафика
+    if sources:
+        src_lines = "\n".join(
+            f"{s['name']}: {s['visits']} виз. ({format_money(s['revenue'])})"
+            for s in sources
+        )
+        sources_block = f"\n\n━━━━━━━━━━━━━━━━\n📡 *По источникам (весь сайт)*\n{src_lines}"
+    else:
+        sources_block = ""
+
     return f"""📊 *Отчёт за {period_label}*
 
 ━━━━━━━━━━━━━━━━
@@ -323,7 +378,7 @@ def build_report(date1: str, date2: str) -> str:
 ━━━━━━━━━━━━━━━━
 🌐 *Покупки по всему сайту*
 👤 Новички: {users['new_orders']} ({format_money(users['new_revenue'])})
-🔁 Старички: {users['ret_orders']} ({format_money(users['ret_revenue'])}){directions_block}{products_block}
+🔁 Старички: {users['ret_orders']} ({format_money(users['ret_revenue'])}){directions_block}{sources_block}{products_block}
 
 ━━━━━━━━━━━━━━━━
 📌 *Итого*
