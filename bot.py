@@ -104,6 +104,117 @@ def get_retail(date1: str, date2: str) -> dict:
     }
 
 
+def get_user_split(date1: str, date2: str) -> dict:
+    """Покупки и доход в разбивке новички / вернувшиеся (по всему сайту)"""
+    params = {
+        "ids": METRIKA_COUNTER,
+        "metrics": "ym:s:ecommercePurchases,ym:s:ecommerceRevenue",
+        "dimensions": "ym:s:isNewUser",
+        "date1": date1,
+        "date2": date2,
+        "limit": 10,
+    }
+    resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
+    if resp.status_code != 200:
+        logger.error(f"Метрика новички/старички ошибка: {resp.status_code} {resp.text}")
+        return {"new_orders": 0, "new_revenue": 0, "ret_orders": 0, "ret_revenue": 0}
+
+    res = {"new_orders": 0, "new_revenue": 0.0, "ret_orders": 0, "ret_revenue": 0.0}
+    for row in resp.json().get("data", []):
+        uid = row["dimensions"][0].get("id")
+        m = row.get("metrics", [0, 0])
+        orders = int(m[0]) if len(m) > 0 else 0
+        revenue = float(m[1]) if len(m) > 1 else 0
+        if uid == "yes":
+            res["new_orders"] = orders
+            res["new_revenue"] = revenue
+        elif uid == "no":
+            res["ret_orders"] = orders
+            res["ret_revenue"] = revenue
+    return res
+
+
+def classify_direction(name: str) -> str:
+    """Определяет направление по названию товара"""
+    n = name.lower().strip()
+
+    # Магазин (мерч/аксессуары)
+    shop_kw = ["футболк", "лонгслив", "толстовк", "флис", "бафф", "шнурок", "носк",
+               "перчатк", "козырёк", "козырек", "гермомешок", "логбук", "чехол",
+               "оплата лицензии", "лицензии issa"]
+    if any(k in n for k in shop_kw):
+        return "🛍 Магазин"
+
+    # Сертификат
+    if "certificate" in n or "сертификат" in n:
+        return "🎁 Сертификаты"
+
+    # Абонемент
+    if "abonement" in n or "абонемент" in n:
+        return "🎫 Абонемент"
+
+    # Школа (курсы, ГИМС, ISSA, теория/практика, яхтенный капитан)
+    school_kw = ["гимс", "issa", "основы яхтинга", "яхтенный капитан", "теория",
+                 "практика гимс", "курс"]
+    if any(k in n for k in school_kw):
+        return "🎓 Школа"
+
+    # Тревел (экспедиции, походы, каникулы, парусные выходные в городах/странах)
+    travel_kw = ["экспедиц", "поход", "каникулы", "ладога", "ладоге", "камчатк",
+                 "белое море", "дальнему востоку", "италии", "черногории", "финскому заливу",
+                 "нижнем новгороде", "ярославле", "казани", "большая регата", "регата в",
+                 "парусные выходные"]
+    if any(k in n for k in travel_kw):
+        return "✈️ Тревел"
+
+    # Лагеря
+    if "лагер" in n or "интенсив" in n:
+        return "🏕 Лагеря"
+
+    # События / корпоратив
+    event_kw = ["события на берегу", "лекторий", "вечеринк", "soft skills", "фестивал",
+                "сила дружбы", "экологический парус", "морская математика",
+                "открытие парусного сезона", "иммерсивная"]
+    if any(k in n for k in event_kw):
+        return "🎉 События"
+
+    # Город (тренировки, прогулки, гонки, кубки на SV20/Лучах/Оптимисте) — по умолчанию
+    return "🏙 Город"
+
+
+def get_directions(date1: str, date2: str) -> list:
+    """Доход и кол-во по направлениям (по названиям товаров, реклама)"""
+    params = {
+        "ids": METRIKA_COUNTER,
+        "metrics": "ym:s:productPurchasedQuantity,ym:s:productPurchasedPrice",
+        "dimensions": "ym:s:productName",
+        "filters": "ym:s:lastSignTrafficSource=='ad'",
+        "date1": date1,
+        "date2": date2,
+        "limit": 500,
+    }
+    resp = requests.get(METRIKA_URL, headers=HEADERS, params=params)
+    if resp.status_code != 200:
+        logger.error(f"Метрика направления ошибка: {resp.status_code} {resp.text}")
+        return []
+
+    dirs = {}
+    for row in resp.json().get("data", []):
+        name = row["dimensions"][0].get("name") or ""
+        m = row.get("metrics", [0, 0])
+        qty = int(m[0]) if len(m) > 0 else 0
+        price = float(m[1]) if len(m) > 1 else 0
+        d = classify_direction(name)
+        if d not in dirs:
+            dirs[d] = {"qty": 0, "price": 0.0}
+        dirs[d]["qty"] += qty
+        dirs[d]["price"] += price
+
+    items = [{"name": d, "qty": v["qty"], "price": v["price"]} for d, v in dirs.items()]
+    items.sort(key=lambda x: x["price"], reverse=True)
+    return items
+
+
 def get_top_products(date1: str, date2: str, top_n: int = 10) -> list:
     params = {
         "ids": METRIKA_COUNTER,
@@ -161,6 +272,8 @@ def build_report(date1: str, date2: str) -> str:
     costs = get_ad_costs(date1, date2)
     b2b_leads = get_b2b_leads(date1, date2)
     retail = get_retail(date1, date2)
+    users = get_user_split(date1, date2)
+    directions = get_directions(date1, date2)
     top_products = get_top_products(date1, date2)
 
     b2b_cost = costs["b2b_cost"]
@@ -176,6 +289,16 @@ def build_report(date1: str, date2: str) -> str:
         products_block = f"\n\n━━━━━━━━━━━━━━━━\n🏆 *Топ товаров*\n{products_lines}"
     else:
         products_block = ""
+
+    # Блок направлений
+    if directions:
+        dir_lines = "\n".join(
+            f"{d['name']}: {format_money(d['price'])} ({d['qty']} шт)"
+            for d in directions
+        )
+        directions_block = f"\n\n━━━━━━━━━━━━━━━━\n🧭 *По направлениям*\n{dir_lines}"
+    else:
+        directions_block = ""
 
     return f"""📊 *Отчёт за {period_label}*
 
@@ -195,7 +318,12 @@ def build_report(date1: str, date2: str) -> str:
 🛒 Оплаты/заказы: {retail['orders']}
 💵 CPO: {calc_per_unit(other_cost, retail['orders'])}
 💰 Доход: {format_money(retail['revenue'])}
-📈 ROAS: {calc_roas(retail['revenue'], other_cost)}{products_block}
+📈 ROAS: {calc_roas(retail['revenue'], other_cost)}
+
+━━━━━━━━━━━━━━━━
+🌐 *Покупки по всему сайту*
+👤 Новички: {users['new_orders']} ({format_money(users['new_revenue'])})
+🔁 Старички: {users['ret_orders']} ({format_money(users['ret_revenue'])}){directions_block}{products_block}
 
 ━━━━━━━━━━━━━━━━
 📌 *Итого*
